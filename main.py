@@ -6,23 +6,21 @@ from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# ----------------- Load environment -----------------
 load_dotenv()
 
-API_ID = os.getenv("API_ID")
+API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-PHONE_NUMBER = os.getenv("PHONE_NUMBER")
-CHANNEL_ID = os.getenv("CHANNEL_ID") # Renamed for clarity
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # must be integer for numeric channel IDs
 
-# Initialize the Pyrogram client
+# ----------------- Initialize client -----------------
 app = Client(
     "my_account",
     api_id=API_ID,
-    api_hash=API_HASH,
-    phone_number=PHONE_NUMBER
+    api_hash=API_HASH
 )
 
-# Define regex patterns for different signal formats
+# ----------------- Regex patterns -----------------
 patterns = {
     "anna_signal": re.compile(
         r"CURRENCY PAIR:\s*([\w\/]+-OTC)\s*.*EXPIRATION:\s*(\w+)\s*.*TIME \(UTC-03:00\):\s*(\d{2}:\d{2}:\d{2})\s*.*(call|put|buy|sell)",
@@ -42,18 +40,19 @@ patterns = {
     ),
 }
 
+# ----------------- Signal parser -----------------
 def parse_signal(message_text):
     """Parses a message and extracts signal data using regex."""
     for signal_type, pattern in patterns.items():
         match = pattern.search(message_text)
         if match:
-            # Handle different signal formats
+            print(f"🔍 Matched pattern: {signal_type}")
+
             if signal_type == "anna_signal":
                 currency_pair, expiration, entry_time_str, direction = match.groups()
                 expiration_int = int(expiration.replace('M', ''))
                 direction = direction.strip().upper()
-                
-                # Calculate martingale levels for Anna signals
+
                 entry_time = datetime.strptime(entry_time_str, "%H:%M:%S").time()
                 martingale_1_time = (datetime.combine(datetime.today(), entry_time) + timedelta(minutes=expiration_int)).time()
                 martingale_2_time = (datetime.combine(datetime.today(), martingale_1_time) + timedelta(minutes=expiration_int)).time()
@@ -69,7 +68,7 @@ def parse_signal(message_text):
                         "level_2": martingale_2_time.strftime("%H:%M")
                     }
                 }
-            
+
             elif signal_type == "pocket_option_otc":
                 currency_pair, expiration, entry_time, direction = match.groups()
                 expiration_int = int(re.search(r'\d+', expiration).group())
@@ -90,9 +89,8 @@ def parse_signal(message_text):
             elif signal_type == "confirmed_entry":
                 asset, entry_time, expiration, direction = match.groups()
                 expiration_int = int(re.search(r'\d+', expiration).group())
-                # Handle PUT/CALL signals by converting to BUY/SELL
                 direction = "BUY" if direction.strip().upper() == "CALL" else "SELL"
-                
+
                 martingale_times = re.findall(r"Martingale \d at (\d{2}:\d{2})", message_text)
                 martingale_levels = {f"level_{i+1}": t for i, t in enumerate(martingale_times)}
 
@@ -104,12 +102,12 @@ def parse_signal(message_text):
                     "direction": direction,
                     "martingale_levels": martingale_levels
                 }
-            
+
             elif signal_type == "currency_flags":
                 currency_pair, expiration, entry_time, direction = match.groups()
                 expiration_int = int(expiration.replace('M', ''))
                 direction = "BUY" if "🟩 BUY" in direction else "SELL"
-                
+
                 martingale_times = re.findall(r"level at (\d{2}:\d{2})", message_text)
                 martingale_levels = {f"level_{i+1}": t for i, t in enumerate(martingale_times)}
 
@@ -122,39 +120,52 @@ def parse_signal(message_text):
                     "martingale_levels": martingale_levels
                 }
 
+    print("⚠️ No matching signal format found.")
     return None
 
+# ----------------- Save signals -----------------
 def save_signal_for_processing(signal_data):
     """Saves the extracted signal data to a JSON file."""
     output_dir = "signals"
     os.makedirs(output_dir, exist_ok=True)
-    
+
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     file_path = os.path.join(output_dir, f"signal_{timestamp}.json")
-    
+
     with open(file_path, "w") as f:
         json.dump(signal_data, f, indent=4)
-    print(f"Signal saved to {file_path}")
 
-@app.on_message(filters.chat(CHANNEL_ID) & filters.text)
-async def handle_message(client, message):
-    """Listens for new messages in the specified channel and processes them."""
-    if message.text:
-        print(f"New message from channel: {message.text}\n---")
-        signal_data = parse_signal(message.text)
-        
-        if signal_data:
-            print("Detected a signal:")
-            for key, value in signal_data.items():
-                print(f"  {key}: {value}")
-            print("\n---")
-            save_signal_for_processing(signal_data)
+    print(f"💾 Signal saved to {file_path}")
 
+# ----------------- Channel listener -----------------
+@app.on_message(filters.channel & filters.chat(CHANNEL_ID) & filters.text)
+async def handle_channel_message(client, message):
+    """Listens for new channel posts."""
+    print(f"\n📩 New message received at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Channel: {message.chat.title if message.chat else CHANNEL_ID}")
+    print(f"Message ID: {message.id}")
+    print(f"Raw text: {message.text}\n---")
+
+    signal_data = parse_signal(message.text)
+
+    if signal_data:
+        print("✅ Extracted signal data:")
+        for key, value in signal_data.items():
+            print(f"  {key}: {value}")
+        print("---")
+        save_signal_for_processing(signal_data)
+    else:
+        print("❌ Message ignored (no valid signal detected).")
+
+# ----------------- Main -----------------
 async def main():
-    """Starts the client and runs the listener."""
+    print("🚀 Starting Telegram client...")
     await app.start()
-    print("Listener started. Waiting for messages...")
-    await asyncio.Future()  # Wait forever until stopped
+    me = await app.get_me()
+    print(f"✅ Logged in as: {me.first_name} ({me.id})")
+    print(f"👀 Listening for messages in channel: {CHANNEL_ID}")
+    print("⚡ Listener started. Waiting for messages...\n")
+    await asyncio.Future()  # run forever
 
 if __name__ == "__main__":
     asyncio.run(main())
